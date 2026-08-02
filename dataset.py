@@ -137,7 +137,7 @@ def image_data_augmentation(mat, w, h, pleft, ptop, swidth, sheight, flip, dhue,
         if dsat != 1 or dexp != 1 or dhue != 0:
             if img.shape[2] >= 3:
                 hsv_src = cv2.cvtColor(sized.astype(np.float32), cv2.COLOR_RGB2HSV)  # RGB to HSV
-                hsv = cv2.split(hsv_src)
+                hsv = list(cv2.split(hsv_src))
                 hsv[1] *= dsat
                 hsv[2] *= dexp
                 hsv[0] += 179 * dhue
@@ -174,9 +174,9 @@ def image_data_augmentation(mat, w, h, pleft, ptop, swidth, sheight, flip, dhue,
             gaussian_noise = max(gaussian_noise, 0)
             cv2.randn(noise, 0, gaussian_noise)  # mean and variance
             sized = sized + noise
-    except:
-        print("OpenCV can't augment image: " + str(w) + " x " + str(h))
-        sized = mat
+    except Exception as error:
+        print("OpenCV can't augment image:", w, "x", h, error)
+        sized = cv2.resize(mat, (w, h))
 
     return sized
 
@@ -255,7 +255,7 @@ class Yolo_dataset(Dataset):
         truth = {}
         f = open(label_path, 'r', encoding='utf-8')
         for line in f.readlines():
-            data = line.split(" ")
+            data = line.strip().split()
             truth[data[0]] = []
             for i in data[1:]:
                 truth[data[0]].append([int(float(j)) for j in i.split(',')])
@@ -270,7 +270,7 @@ class Yolo_dataset(Dataset):
         if not self.train:
             return self._get_val_item(index)
         img_path = self.imgs[index]
-        bboxes = np.array(self.truth.get(img_path), dtype=np.float)
+        bboxes = np.array(self.truth.get(img_path), dtype=np.float32)
         img_path = os.path.join(self.cfg.dataset_dir, img_path)
         use_mixup = self.cfg.mixup
         if random.randint(0, 1):
@@ -291,14 +291,14 @@ class Yolo_dataset(Dataset):
         for i in range(use_mixup + 1):
             if i != 0:
                 img_path = random.choice(list(self.truth.keys()))
-                bboxes = np.array(self.truth.get(img_path), dtype=np.float)
+                bboxes = np.array(self.truth.get(img_path), dtype=np.float32)
                 img_path = os.path.join(self.cfg.dataset_dir, img_path)
             img = cv2.imread(img_path)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             if img is None:
                 continue
             oh, ow, oc = img.shape
-            dh, dw, dc = np.array(np.array([oh, ow, oc]) * self.cfg.jitter, dtype=np.int)
+            dh, dw, dc = np.array(np.array([oh, ow, oc]) * self.cfg.jitter, dtype=np.int32)
 
             dhue = rand_uniform_strong(-self.cfg.hue, self.cfg.hue)
             dsat = rand_scale(self.cfg.saturation)
@@ -390,7 +390,7 @@ class Yolo_dataset(Dataset):
         """
         """
         img_path = self.imgs[index]
-        bboxes_with_cls_id = np.array(self.truth.get(img_path), dtype=np.float)
+        bboxes_with_cls_id = np.array(self.truth.get(img_path), dtype=np.float32)
         img = cv2.imread(os.path.join(self.cfg.dataset_dir, img_path))
         # img_height, img_width = img.shape[:2]
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -409,32 +409,10 @@ class Yolo_dataset(Dataset):
         return img, target
 
 
-def get_image_id(filename:str) -> int:
-    """
-    Convert a string to a integer.
-    Make sure that the images and the `image_id`s are in one-one correspondence.
-    There are already `image_id`s in annotations of the COCO dataset,
-    in which case this function is unnecessary.
-    For creating one's own `get_image_id` function, one can refer to
-    https://github.com/google/automl/blob/master/efficientdet/dataset/create_pascal_tfrecord.py#L86
-    or refer to the following code (where the filenames are like 'level1_123.jpg')
-    >>> lv, no = os.path.splitext(os.path.basename(filename))[0].split("_")
-    >>> lv = lv.replace("level", "")
-    >>> no = f"{int(no):04d}"
-    >>> return int(lv+no)
-    """
-    # raise NotImplementedError("Create your own 'get_image_id' function")
-    # lv, no = os.path.splitext(os.path.basename(filename))[0].split("_")
-    # lv = lv.replace("level", "")
-    # no = f"{int(no):04d}"
-    # return int(lv+no)
-
-    print("You could also create your own 'get_image_id' function.")
-    # print(filename)
-    parts = filename.split('/')
-    id = int(parts[-1][0:-4])
-    # print(id)
-    return id
+def get_image_id(filename: str) -> int:
+    name = os.path.splitext(os.path.basename(filename))[0]
+    digits = "".join(c for c in name if c.isdigit())
+    return int(digits)
 
 
 if __name__ == "__main__":
