@@ -57,7 +57,7 @@ Cfg.blur = 0
 Cfg.gaussian = 0
 Cfg.boxes = 60
 
-Cfg.TRAIN_EPOCHS = 1
+Cfg.TRAIN_EPOCHS = 50
 
 # This repository expects converted annotation text files
 Cfg.train_label = os.path.join(
