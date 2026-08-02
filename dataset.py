@@ -294,9 +294,11 @@ class Yolo_dataset(Dataset):
                 bboxes = np.array(self.truth.get(img_path), dtype=np.float32)
                 img_path = os.path.join(self.cfg.dataset_dir, img_path)
             img = cv2.imread(img_path)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
             if img is None:
-                continue
+                raise FileNotFoundError(f"Could not read image: {img_path}")
+
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             oh, ow, oc = img.shape
             dh, dw, dc = np.array(np.array([oh, ow, oc]) * self.cfg.jitter, dtype=np.int32)
 
@@ -381,20 +383,37 @@ class Yolo_dataset(Dataset):
                 out_bboxes.append(out_bbox)
                 # print(img_path)
         if use_mixup == 3:
-            out_bboxes = np.concatenate(out_bboxes, axis=0)
-            out_bboxes = np.asarray(
+            if len(out_bboxes) > 0:
+                out_bboxes = np.concatenate(out_bboxes, axis=0)
+            else:
+                out_bboxes = np.empty((0, 5), dtype=np.float32)
+
+        # Must run for mosaic and non-mosaic images.
+        out_bboxes = np.asarray(
             out_bboxes,
             dtype=np.float32
         ).reshape(-1, 5)
-        out_bboxes1 = np.zeros([self.cfg.boxes, 5])
-        out_bboxes1[:min(out_bboxes.shape[0], self.cfg.boxes)] = out_bboxes[:min(out_bboxes.shape[0], self.cfg.boxes)]
+
+        out_bboxes1 = np.zeros(
+            (self.cfg.boxes, 5),
+            dtype=np.float32
+        )
+
+        box_count = min(out_bboxes.shape[0], self.cfg.boxes)
+
+        if box_count > 0:
+            out_bboxes1[:box_count] = out_bboxes[:box_count]
+
         return out_img, out_bboxes1
 
     def _get_val_item(self, index):
         """
         """
         img_path = self.imgs[index]
-        bboxes_with_cls_id = np.array(self.truth.get(img_path), dtype=np.float32)
+        bboxes_with_cls_id = np.array(
+            self.truth.get(img_path),
+            dtype=np.float32
+        ).reshape(-1, 5)
         img = cv2.imread(os.path.join(self.cfg.dataset_dir, img_path))
         # img_height, img_width = img.shape[:2]
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
