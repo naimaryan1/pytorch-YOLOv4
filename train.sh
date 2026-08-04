@@ -12,4 +12,3 @@ python3 train.py \
   -classes 2 \
   -dir "$PATH_D_FIRE_DATA_ROOT" \
   -train_label_path "$PATH_TO_TRAIN_DATA_LIST"
-

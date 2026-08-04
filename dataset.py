@@ -148,32 +148,45 @@ def image_data_augmentation(mat, w, h, pleft, ptop, swidth, sheight, flip, dhue,
 
         if blur:
             if blur == 1:
-                dst = cv2.GaussianBlur(sized, (17, 17), 0)
-                # cv2.bilateralFilter(sized, dst, 17, 75, 75)
+                dst = cv2.GaussianBlur(
+                    sized.astype(np.float32),
+                    (17, 17),
+                    0
+                )
             else:
-                ksize = (blur / 2) * 2 + 1
-                dst = cv2.GaussianBlur(sized, (ksize, ksize), 0)
+                ksize = int(blur)
 
-            if blur == 1:
-                img_rect = [0, 0, sized.cols, sized.rows]
-                for b in truth:
-                    left = (b.x - b.w / 2.) * sized.shape[1]
-                    width = b.w * sized.shape[1]
-                    top = (b.y - b.h / 2.) * sized.shape[0]
-                    height = b.h * sized.shape[0]
-                    roi(left, top, width, height)
-                    roi = roi & img_rect
-                    dst[roi[0]:roi[0] + roi[2], roi[1]:roi[1] + roi[3]] = sized[roi[0]:roi[0] + roi[2],
-                                                                          roi[1]:roi[1] + roi[3]]
+                if ksize < 1:
+                    ksize = 1
+
+                if ksize % 2 == 0:
+                    ksize += 1
+
+                dst = cv2.GaussianBlur(
+                    sized.astype(np.float32),
+                    (ksize, ksize),
+                    0
+                )
 
             sized = dst
 
         if gaussian_noise:
-            noise = np.array(sized.shape)
+            noise = np.zeros_like(
+                sized,
+                dtype=np.float32
+            )
+
             gaussian_noise = min(gaussian_noise, 127)
             gaussian_noise = max(gaussian_noise, 0)
-            cv2.randn(noise, 0, gaussian_noise)  # mean and variance
-            sized = sized + noise
+
+            cv2.randn(
+                noise,
+                0,
+                gaussian_noise
+            )
+
+            sized = sized.astype(np.float32) + noise
+            sized = np.clip(sized, 0, 255)
     except Exception as error:
         print("OpenCV can't augment image:", w, "x", h, error)
         sized = cv2.resize(mat, (w, h))
