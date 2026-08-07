@@ -399,13 +399,64 @@ def val_loss_collate(batch, config):
 
     return images, all_bboxes
 
+def get_last_epoch(checkpoints_path):
+    if not os.path.isdir(checkpoints_path):
+        return 0
 
-def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=20, img_scale=0.5):
+    checkpoint_files = os.listdir(checkpoints_path)
+    epoch_numbers = []
+
+    for filename in checkpoint_files:
+        if filename.startswith("Yolov4_epoch") and filename.endswith(".pth"):
+            epoch_str = filename[len("Yolov4_epoch"):-len(".pth")]
+
+            if epoch_str.isdigit():
+                epoch_numbers.append(int(epoch_str))
+
+    if len(epoch_numbers) == 0:
+        return 0
+
+    return max(epoch_numbers)
+
+
+def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=20, img_scale=0.5, restart=False):
     train_dataset = Yolo_dataset(config.train_label, config, train=True)
     val_dataset = Yolo_dataset(config.val_label, config, train=False)
 
     n_train = len(train_dataset)
     n_val = len(val_dataset)
+
+    last_epoch = 0
+
+    if restart:
+        last_epoch = get_last_epoch(config.checkpoints)
+
+        if last_epoch > 0:
+            checkpoint_path = os.path.join(
+                config.checkpoints,
+                f"Yolov4_epoch{last_epoch}.pth"
+            )
+
+            print(
+                f"Restarting training from checkpoint: "
+                f"{checkpoint_path}"
+            )
+
+            state_dict = torch.load(
+                checkpoint_path,
+                map_location=device
+            )
+
+            if isinstance(model, torch.nn.DataParallel):
+                model.module.load_state_dict(state_dict)
+            else:
+                model.load_state_dict(state_dict)
+
+        else:
+            print(
+                "No existing checkpoint found. "
+                "Starting training from epoch 0."
+            )
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch // config.subdivisions, shuffle=True,
                               num_workers=2, pin_memory=True, drop_last=True, collate_fn=collate)
@@ -532,7 +583,7 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
     saved_models = deque()
     optimizer.zero_grad()
     model.train()
-    for epoch in range(epochs):
+    for epoch in range(last_epoch, epochs):
         epoch_loss = 0.0
         epoch_loss_xy = 0.0
         epoch_loss_wh = 0.0
@@ -933,6 +984,12 @@ def get_args(**kwargs):
         '-keep-checkpoint-max', type=int, default=10,
         help='maximum number of checkpoints to keep. If set 0, all checkpoints will be kept',
         dest='keep_checkpoint_max')
+    parser.add_argument(
+        '-restart',
+        type=str,
+        default='false',
+        help='Restart training from latest checkpoint'
+    )
     args = vars(parser.parse_args())
 
     # for k in args.keys():
@@ -1002,7 +1059,8 @@ if __name__ == "__main__":
         train(model=model,
               config=cfg,
               epochs=cfg.TRAIN_EPOCHS,
-              device=device, )
+              device=device,
+              restart=str(cfg.restart).lower() == "true")
     except KeyboardInterrupt:
         if isinstance(model, torch.nn.DataParallel):
             torch.save(model.module.state_dict(), 'INTERRUPTED.pth')
