@@ -459,13 +459,13 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
             )
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch // config.subdivisions, shuffle=True,
-                              num_workers=2, pin_memory=True, drop_last=True, collate_fn=collate)
+                              num_workers=8, pin_memory=True, drop_last=True, collate_fn=collate)
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.batch // config.subdivisions,
         shuffle=False,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
         drop_last=False,
         collate_fn=val_collate
@@ -475,7 +475,7 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
         val_dataset,
         batch_size=config.batch // config.subdivisions,
         shuffle=False,
-        num_workers=0,
+        num_workers=4,
         pin_memory=True,
 
         # Yolo_loss currently creates fixed-size grids
@@ -502,29 +502,30 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
         "per_epoch_train_val_loss.csv"
     )
 
-    with open(
-            loss_csv_path,
-            "w",
-            newline="",
-            encoding="utf-8"
-    ) as csv_file:
-        csv_writer = csv.writer(csv_file)
+    if not restart or not os.path.exists(loss_csv_path):
+        with open(
+                loss_csv_path,
+                "w",
+                newline="",
+                encoding="utf-8"
+        ) as csv_file:
+            csv_writer = csv.writer(csv_file)
 
-        csv_writer.writerow([
-            "epoch",
-            "train_loss",
-            "train_loss_xy",
-            "train_loss_wh",
-            "train_loss_obj",
-            "train_loss_cls",
-            "train_loss_l2",
-            "val_loss",
-            "val_loss_xy",
-            "val_loss_wh",
-            "val_loss_obj",
-            "val_loss_cls",
-            "val_loss_l2",
-        ])
+            csv_writer.writerow([
+                "epoch",
+                "train_loss",
+                "train_loss_xy",
+                "train_loss_wh",
+                "train_loss_obj",
+                "train_loss_cls",
+                "train_loss_l2",
+                "val_loss",
+                "val_loss_xy",
+                "val_loss_wh",
+                "val_loss_obj",
+                "val_loss_cls",
+                "val_loss_l2",
+            ])
     # writer.add_images('legend',
     #                   torch.from_numpy(train_dataset.label2colorlegend2(cfg.DATA_CLASSES).transpose([2, 0, 1])).to(
     #                       device).unsqueeze(0))

@@ -1,13 +1,10 @@
 cd /content/gdrive/MyDrive/pytorch-YOLOv4
 
-python3 -u train.py \
+nohup python3 -u train.py \
   -l 0.001 \
   -g 0 \
   -pretrained ./yolov4.conv.137.pth \
   -classes 2 \
   -dir /content/gdrive/MyDrive/Smoke_and_Fire_Datasets/D-Fire \
   -train_label_path ./data/train.txt \
-  -restart true \
-   > train_output.log 2>&1 &
-
-echo $! > train.pid
+  -restart true

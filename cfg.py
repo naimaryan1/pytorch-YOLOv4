@@ -16,9 +16,9 @@ Cfg.cfgfile = os.path.join(
     "yolov4-custom-2class-t4.cfg"
 )
 
-# T4-friendly settings
+# A100 settings
 Cfg.batch = 32
-Cfg.subdivisions = 8
+Cfg.subdivisions = 1
 
 Cfg.width = 608
 Cfg.height = 608
