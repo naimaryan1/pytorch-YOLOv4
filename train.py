@@ -36,6 +36,8 @@ from tool.darknet2pytorch import Darknet
 from tool.tv_reference.utils import collate_fn as val_collate
 from tool.tv_reference.coco_utils import convert_to_coco_api
 from tool.tv_reference.coco_eval import CocoEvaluator
+import csv
+from functools import partial
 
 
 def bboxes_iou(bboxes_a, bboxes_b, xyxy=True, GIoU=False, DIoU=False, CIoU=False):
@@ -287,6 +289,116 @@ def collate(batch):
     bboxes = torch.from_numpy(bboxes)
     return images, bboxes
 
+def val_loss_collate(batch, config):
+    """
+    Prepare validation images and labels for Yolo_loss.
+
+    No augmentation is performed:
+    - no jitter
+    - no crop augmentation
+    - no flip
+    - no HSV changes
+    - no blur/noise
+    - no mosaic/mixup
+
+    Only resize and bounding-box scaling are performed.
+    """
+    images = []
+    all_bboxes = []
+
+    for img, target in batch:
+        original_h, original_w = img.shape[:2]
+
+        # Resize only. This is not random augmentation.
+        resized_img = cv2.resize(
+            img,
+            (config.w, config.h),
+            interpolation=cv2.INTER_LINEAR
+        )
+
+        # _get_val_item() returns COCO boxes:
+        # [x, y, width, height]
+        boxes = target["boxes"].cpu().numpy().astype(
+            np.float32,
+            copy=True
+        )
+
+        labels = target["labels"].cpu().numpy()
+
+        if boxes.shape[0] > 0:
+            scale_x = config.w / original_w
+            scale_y = config.h / original_h
+
+            # Scale COCO [x, y, width, height].
+            boxes[:, 0] *= scale_x
+            boxes[:, 1] *= scale_y
+            boxes[:, 2] *= scale_x
+            boxes[:, 3] *= scale_y
+
+            # Convert from [x, y, width, height]
+            # to [x1, y1, x2, y2].
+            boxes[:, 2] += boxes[:, 0]
+            boxes[:, 3] += boxes[:, 1]
+
+            boxes[:, 0] = np.clip(
+                boxes[:, 0],
+                0,
+                config.w
+            )
+            boxes[:, 1] = np.clip(
+                boxes[:, 1],
+                0,
+                config.h
+            )
+            boxes[:, 2] = np.clip(
+                boxes[:, 2],
+                0,
+                config.w
+            )
+            boxes[:, 3] = np.clip(
+                boxes[:, 3],
+                0,
+                config.h
+            )
+
+        padded_boxes = np.zeros(
+            (config.boxes, 5),
+            dtype=np.float32
+        )
+
+        box_count = min(
+            boxes.shape[0],
+            config.boxes
+        )
+
+        if box_count > 0:
+            padded_boxes[:box_count, :4] = boxes[:box_count]
+            padded_boxes[:box_count, 4] = labels[:box_count]
+
+        images.append(resized_img)
+        all_bboxes.append(padded_boxes)
+
+    images = np.stack(images).astype(
+        np.float32
+    )
+
+    images = images.transpose(
+        0,
+        3,
+        1,
+        2
+    )
+
+    images = torch.from_numpy(
+        images
+    ).div(255.0)
+
+    all_bboxes = torch.from_numpy(
+        np.stack(all_bboxes)
+    ).float()
+
+    return images, all_bboxes
+
 
 def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=20, img_scale=0.5):
     train_dataset = Yolo_dataset(config.train_label, config, train=True)
@@ -298,12 +410,70 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
     train_loader = DataLoader(train_dataset, batch_size=config.batch // config.subdivisions, shuffle=True,
                               num_workers=2, pin_memory=True, drop_last=True, collate_fn=collate)
 
-    val_loader = DataLoader(val_dataset, batch_size=config.batch // config.subdivisions, shuffle=True, num_workers=2,
-                            pin_memory=True, drop_last=True, collate_fn=val_collate)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.batch // config.subdivisions,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=val_collate
+    )
+
+    val_loss_loader = DataLoader(
+        val_dataset,
+        batch_size=config.batch // config.subdivisions,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+
+        # Yolo_loss currently creates fixed-size grids
+        # using config.batch // config.subdivisions.
+        drop_last=True,
+
+        collate_fn=partial(
+            val_loss_collate,
+            config=config
+        )
+    )
 
     writer = SummaryWriter(log_dir=config.TRAIN_TENSORBOARD_DIR,
                            filename_suffix=f'OPT_{config.TRAIN_OPTIMIZER}_LR_{config.learning_rate}_BS_{config.batch}_Sub_{config.subdivisions}_Size_{config.width}',
                            comment=f'OPT_{config.TRAIN_OPTIMIZER}_LR_{config.learning_rate}_BS_{config.batch}_Sub_{config.subdivisions}_Size_{config.width}')
+    #CSV writer:
+    os.makedirs(
+        config.TRAIN_TENSORBOARD_DIR,
+        exist_ok=True
+    )
+
+    loss_csv_path = os.path.join(
+        config.TRAIN_TENSORBOARD_DIR,
+        "per_epoch_train_val_loss.csv"
+    )
+
+    with open(
+            loss_csv_path,
+            "w",
+            newline="",
+            encoding="utf-8"
+    ) as csv_file:
+        csv_writer = csv.writer(csv_file)
+
+        csv_writer.writerow([
+            "epoch",
+            "train_loss",
+            "train_loss_xy",
+            "train_loss_wh",
+            "train_loss_obj",
+            "train_loss_cls",
+            "train_loss_l2",
+            "val_loss",
+            "val_loss_xy",
+            "val_loss_wh",
+            "val_loss_obj",
+            "val_loss_cls",
+            "val_loss_l2",
+        ])
     # writer.add_images('legend',
     #                   torch.from_numpy(train_dataset.label2colorlegend2(cfg.DATA_CLASSES).transpose([2, 0, 1])).to(
     #                       device).unsqueeze(0))
@@ -311,19 +481,19 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
     # global_step = cfg.TRAIN_MINEPOCH * n_train
     global_step = 0
     logging.info(f'''Starting training:
-        Epochs:          {epochs}
-        Batch size:      {config.batch}
+        *Epochs:          {epochs}
+        *Batch size:      {config.batch}
         Subdivisions:    {config.subdivisions}
-        Learning rate:   {config.learning_rate}
+        *Learning rate:   {config.learning_rate}
         Training size:   {n_train}
         Validation size: {n_val}
         Checkpoints:     {save_cp}
         Device:          {device.type}
         Images size:     {config.width}
         Optimizer:       {config.TRAIN_OPTIMIZER}
-        Dataset classes: {config.classes}
-        Train label path:{config.train_label}
-        Pretrained:
+        *Dataset classes: {config.classes}
+        *Train label path:{config.train_label}
+        *Validation label path:{config.val_label}
     ''')
 
     # learning rate setup
@@ -360,10 +530,15 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
 
     save_prefix = 'Yolov4_epoch'
     saved_models = deque()
+    optimizer.zero_grad()
     model.train()
     for epoch in range(epochs):
-        # model.train()
-        epoch_loss = 0
+        epoch_loss = 0.0
+        epoch_loss_xy = 0.0
+        epoch_loss_wh = 0.0
+        epoch_loss_obj = 0.0
+        epoch_loss_cls = 0.0
+        epoch_loss_l2 = 0.0
         epoch_step = 0
 
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img', ncols=50) as pbar:
@@ -382,6 +557,11 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
                 loss.backward()
 
                 epoch_loss += loss.item()
+                epoch_loss_xy += loss_xy.item()
+                epoch_loss_wh += loss_wh.item()
+                epoch_loss_obj += loss_obj.item()
+                epoch_loss_cls += loss_cls.item()
+                epoch_loss_l2 += loss_l2.item()
 
                 if global_step % config.subdivisions == 0:
                     optimizer.step()
@@ -412,32 +592,224 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
 
                 pbar.update(images.shape[0])
 
-            if cfg.use_darknet_cfg:
-                eval_model = Darknet(cfg.cfgfile, inference=True)
+            if epoch_step == 0:
+                raise RuntimeError(
+                    "Training loader returned zero batches."
+                )
+
+            train_loss = epoch_loss / epoch_step
+            train_loss_xy = epoch_loss_xy / epoch_step
+            train_loss_wh = epoch_loss_wh / epoch_step
+            train_loss_obj = epoch_loss_obj / epoch_step
+            train_loss_cls = epoch_loss_cls / epoch_step
+            train_loss_l2 = epoch_loss_l2 / epoch_step
+
+            # Validation-loss pass.
+            #
+            # val_dataset uses train=False.
+            # val_loss_collate performs only resize and box scaling.
+            # No validation augmentation is performed.
+
+            model.eval()
+
+            val_loss_total = 0.0
+            val_loss_xy_total = 0.0
+            val_loss_wh_total = 0.0
+            val_loss_obj_total = 0.0
+            val_loss_cls_total = 0.0
+            val_loss_l2_total = 0.0
+            val_steps = 0
+
+            with torch.no_grad():
+                for val_images, val_bboxes in val_loss_loader:
+                    val_images = val_images.to(
+                        device=device,
+                        dtype=torch.float32
+                    )
+
+                    val_bboxes = val_bboxes.to(
+                        device=device,
+                        dtype=torch.float32
+                    )
+
+                    # This uses the normal training model,
+                    # not the inference=True evaluation model.
+                    val_predictions = model(val_images)
+
+                    (
+                        batch_val_loss,
+                        batch_val_loss_xy,
+                        batch_val_loss_wh,
+                        batch_val_loss_obj,
+                        batch_val_loss_cls,
+                        batch_val_loss_l2,
+                    ) = criterion(
+                        val_predictions,
+                        val_bboxes
+                    )
+
+                    val_loss_total += batch_val_loss.item()
+                    val_loss_xy_total += batch_val_loss_xy.item()
+                    val_loss_wh_total += batch_val_loss_wh.item()
+                    val_loss_obj_total += batch_val_loss_obj.item()
+                    val_loss_cls_total += batch_val_loss_cls.item()
+                    val_loss_l2_total += batch_val_loss_l2.item()
+
+                    val_steps += 1
+
+            if val_steps == 0:
+                raise RuntimeError(
+                    "Validation-loss loader returned zero batches."
+                )
+
+            val_loss = val_loss_total / val_steps
+            val_loss_xy = val_loss_xy_total / val_steps
+            val_loss_wh = val_loss_wh_total / val_steps
+            val_loss_obj = val_loss_obj_total / val_steps
+            val_loss_cls = val_loss_cls_total / val_steps
+            val_loss_l2 = val_loss_l2_total / val_steps
+
+            # Restore training mode for the next epoch.
+            model.train()
+
+            writer.add_scalar(
+                "epoch/train_loss",
+                train_loss,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/train_loss_xy",
+                train_loss_xy,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/train_loss_wh",
+                train_loss_wh,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/train_loss_obj",
+                train_loss_obj,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/train_loss_cls",
+                train_loss_cls,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/train_loss_l2",
+                train_loss_l2,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/val_loss",
+                val_loss,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/val_loss_xy",
+                val_loss_xy,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/val_loss_wh",
+                val_loss_wh,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/val_loss_obj",
+                val_loss_obj,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/val_loss_cls",
+                val_loss_cls,
+                epoch + 1
+            )
+
+            writer.add_scalar(
+                "epoch/val_loss_l2",
+                val_loss_l2,
+                epoch + 1
+            )
+
+            with open(
+                    loss_csv_path,
+                    "a",
+                    newline="",
+                    encoding="utf-8"
+            ) as csv_file:
+                csv_writer = csv.writer(csv_file)
+
+                csv_writer.writerow([
+                    epoch + 1,
+                    train_loss,
+                    train_loss_xy,
+                    train_loss_wh,
+                    train_loss_obj,
+                    train_loss_cls,
+                    train_loss_l2,
+                    val_loss,
+                    val_loss_xy,
+                    val_loss_wh,
+                    val_loss_obj,
+                    val_loss_cls,
+                    val_loss_l2,
+                ])
+
+            # existing COCO AP/AR evaluation
+            if config.use_darknet_cfg:
+                    eval_model = Darknet(
+                        config.cfgfile,
+                        inference=True)
             else:
-                eval_model = Yolov4(cfg.pretrained, n_classes=cfg.classes, inference=True)
-            # eval_model = Yolov4(yolov4conv137weight=None, n_classes=config.classes, inference=True)
+                    eval_model = Yolov4(
+                        config.pretrained,
+                        n_classes=config.classes,
+                        inference=True)
+
             if torch.cuda.device_count() > 1:
-                eval_model.load_state_dict(model.module.state_dict())
+                    eval_model.load_state_dict(
+                        model.module.state_dict())
             else:
-                eval_model.load_state_dict(model.state_dict())
+                    eval_model.load_state_dict(
+                        model.state_dict())
+
             eval_model.to(device)
-            evaluator = evaluate(eval_model, val_loader, config, device)
+
+            evaluator = evaluate(
+                    eval_model,
+                    val_loader,
+                    config,
+                    device)
+
             del eval_model
 
             stats = evaluator.coco_eval['bbox'].stats
-            writer.add_scalar('train/AP', stats[0], global_step)
-            writer.add_scalar('train/AP50', stats[1], global_step)
-            writer.add_scalar('train/AP75', stats[2], global_step)
-            writer.add_scalar('train/AP_small', stats[3], global_step)
-            writer.add_scalar('train/AP_medium', stats[4], global_step)
-            writer.add_scalar('train/AP_large', stats[5], global_step)
-            writer.add_scalar('train/AR1', stats[6], global_step)
-            writer.add_scalar('train/AR10', stats[7], global_step)
-            writer.add_scalar('train/AR100', stats[8], global_step)
-            writer.add_scalar('train/AR_small', stats[9], global_step)
-            writer.add_scalar('train/AR_medium', stats[10], global_step)
-            writer.add_scalar('train/AR_large', stats[11], global_step)
+            writer.add_scalar("val/AP", stats[0], epoch + 1)
+            writer.add_scalar("val/AP50", stats[1], epoch + 1)
+            writer.add_scalar("val/AP75", stats[2], epoch + 1)
+            writer.add_scalar("val/AP_small", stats[3], epoch + 1)
+            writer.add_scalar("val/AP_medium", stats[4], epoch + 1)
+            writer.add_scalar("val/AP_large", stats[5], epoch + 1)
+
+            writer.add_scalar("val/AR1", stats[6], epoch + 1)
+            writer.add_scalar("val/AR10", stats[7], epoch + 1)
+            writer.add_scalar("val/AR100", stats[8], epoch + 1)
+            writer.add_scalar("val/AR_small", stats[9], epoch + 1)
+            writer.add_scalar("val/AR_medium", stats[10], epoch + 1)
+            writer.add_scalar("val/AR_large", stats[11], epoch + 1)
 
             if save_cp:
                 try:
@@ -448,7 +820,10 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
                     pass
                 save_path = os.path.join(config.checkpoints, f'{save_prefix}{epoch + 1}.pth')
                 if isinstance(model, torch.nn.DataParallel):
-                    torch.save(model.moduel,state_dict(), save_path)
+                    torch.save(
+                        model.module.state_dict(),
+                        save_path
+                    )
                 else:
                     torch.save(model.state_dict(), save_path)
                 logging.info(f'Checkpoint {epoch + 1} saved !')
@@ -461,6 +836,7 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
                         logging.info(f'failed to remove {model_to_remove}')
 
     writer.close()
+
 
 
 @torch.no_grad()
