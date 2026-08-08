@@ -24,7 +24,7 @@ from tool.tv_reference.coco_eval import CocoEvaluator
 CPU example:
 
 python evaluate_on_test.py \
-  -checkpoint /content/gdrive/MyDrive/pytorch-YOLOv4/checkpoints/Yolov4_epoch150.pth \
+  -checkpoint /content/gdrive/MyDrive/pytorch-YOLOv4/checkpoints/Yolov4_epoch125.pth \
   -test_label /content/gdrive/MyDrive/pytorch-YOLOv4/data/test.txt \
   -dir /content/gdrive/MyDrive/Smoke_and_Fire_Datasets/D-Fire \
   -classes 2 \
@@ -51,6 +51,27 @@ python evaluate_on_test.py \
   
   
 """
+# -*- coding: utf-8 -*-
+
+import argparse
+import cv2
+import math
+import os
+import random
+import tempfile
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from easydict import EasyDict as edict
+
+from cfg import Cfg
+from dataset import Yolo_dataset
+from models import Yolov4
+from tool.tv_reference.utils import collate_fn as val_collate
+from tool.tv_reference.coco_utils import convert_to_coco_api
+from tool.tv_reference.coco_eval import CocoEvaluator
+
 
 SUBSET_SEED = 40
 INFERENCE_SCORE_THRESHOLD = 0.40
