@@ -1,12 +1,25 @@
 # -*- coding: utf-8 -*-
-#call: nohup python tune_test_confidence_iou_threshold.py > test_tune.log 2>&1 &
+#call: nohup python tune_confidence_iou_threshold_for_inference.py > test_tune.log 2>&1 &
 import os
 import re
 import subprocess
+import random
+random.seed(40)
 
+#params we want to try
 CONFIDENCES = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1]
 IOUS = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1]
 
+#get 60% subset which will statistically lead us to same or similar optimal value without going through entire list
+CONFIDENCES = sorted(
+    random.sample(CONFIDENCES, int(len(CONFIDENCES) * 0.6))
+)
+
+IOUS = sorted(
+    random.sample(IOUS, int(len(IOUS) * 0.6))
+)
+print("CONFIDENCES:", CONFIDENCES)
+print("IOUS:", IOUS)
 RESULTS_DIR = (
     "/content/gdrive/MyDrive/Smoke_and_Fire_Datasets/"
     "D-Fire/results/tuned"
@@ -18,7 +31,7 @@ COMMAND_BASE = [
     "-checkpoint",
     "/content/gdrive/MyDrive/pytorch-YOLOv4/checkpoints/Yolov4_epoch125.pth",
     "-test_label",
-    "/content/gdrive/MyDrive/pytorch-YOLOv4/data/test.txt",
+    "/content/gdrive/MyDrive/pytorch-YOLOv4/data/val.txt", #must use validation set not test set
     "-dir",
     "/content/gdrive/MyDrive/Smoke_and_Fire_Datasets/D-Fire",
     "-classes",
