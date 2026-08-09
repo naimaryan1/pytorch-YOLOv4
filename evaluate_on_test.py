@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-#Download evaluate_on_test_latest_20260808_v6_commands.py 5:37 8/8/2026
 
 """
+6:11 pm
 8/8/2026
 
 LATEST COMMAND EXAMPLES
@@ -322,7 +322,7 @@ def evaluate(
 
     test_results_file = open(
         test_results_path,
-        "w",
+        "a",
         encoding="utf-8"
     )
 
@@ -535,6 +535,7 @@ def evaluate(
             f"TRUTH:{truth_lines[image_index]} "
             f"INFERED:{' '.join(inferred_parts)}\n"
         )
+        test_results_file.flush()
 
         coco_evaluator.update(res)
 
@@ -597,6 +598,7 @@ def evaluate(
 
 
 def select_device(gpu_cores):
+
     if gpu_cores is None:
         print("GPU cores not specified. Using CPU.")
         return torch.device("cpu"), []
