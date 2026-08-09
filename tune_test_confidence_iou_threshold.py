@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+#call: nohup python tune_test_confidence_iou_threshold.py > test_tune.log 2>&1 &
 import os
 import re
 import subprocess
