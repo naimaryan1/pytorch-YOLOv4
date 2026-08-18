@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 #call: nohup python tune_confidence_iou_threshold_for_inference.py > test_tune.log 2>&1 &
+# -confidence_threshold 0.1  -nms_iou_threshold 0.5 based on tune_confidence_iou_threshold_for_inference.py
 import os
 import re
 import subprocess
@@ -10,7 +11,8 @@ random.seed(40)
 CONFIDENCES = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1]
 IOUS = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1]
 
-#get 60% subset which will statistically lead us to same or similar optimal value without going through entire list
+
+#get 60% subset which will statistically lead us to same or similar optimal value without going through entire li
 CONFIDENCES = sorted(
     random.sample(CONFIDENCES, int(len(CONFIDENCES) * 0.6))
 )
