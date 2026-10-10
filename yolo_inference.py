@@ -5,8 +5,8 @@ python yolo_inference_multi_camera.py \
   --data-input-path \
     /dev/shm/camera/0/ \
     /dev/shm/camera/1/  \
-  --model-path /mnt/edgeusb/client_models/model.onnx \
-  --model-type onnx \
+  --model-path  /path/to/yolov4_608.hef \
+  --halio \
   --confidence-threshold 0.30 \
   --nms-iou-threshold 0.50
 
@@ -16,10 +16,12 @@ sudo /home/edgemonitor/client_venvs/yolo_inference/bin/python yolo_inference.py 
   --data-input-path \
     /dev/shm/camera/0/latest_frame \
     /dev/shm/camera/1/latest_frame \
-  --model-path /mnt/edgeusb/client_models/yolov4_1_3_608_608_static.onnx \
-  --model-type onnx \
+  -onnrx /path/to/model.onnx \
   --confidence-threshold 0.30 \
   --nms-iou-threshold 0.50
+
+python3 yolo_inference.py -onnx --model-path /path/to/model.onnx
+python3 yolo_inference.py -hailo --model-path /path/to/yolov4_608.hef
 
 """
 import argparse
@@ -33,6 +35,7 @@ import struct
 import time
 import urllib.request
 from enum import Enum
+from contextlib import ExitStack
 
 try:
     import cv2
@@ -75,6 +78,7 @@ class MODEL_TYPE(Enum):
     tensorflow = 4
     onnx = 5
     custom_python = 6
+    hailo = 7
 
 
 class ResultWriter:
@@ -258,6 +262,8 @@ def _run_inference_loop(
                     time.sleep(0.001)
 
     finally:
+        if model_type == MODEL_TYPE.hailo and model is not None:
+            model.close()
         for stream in camera_streams:
             stream["memory"].close()
 
@@ -311,6 +317,11 @@ def _load_model(model_path, model_type):
     if not model_path:
         return None
 
+    expected_suffix = {MODEL_TYPE.onnx: ".onnx", MODEL_TYPE.hailo: ".hef"}.get(model_type)
+    if expected_suffix and not model_path.lower().endswith(expected_suffix):
+        raise ValueError(f"{model_type.name} requires a {expected_suffix} model")
+    if model_type == MODEL_TYPE.hailo:
+        return _HailoModel(model_path)
     if model_type == MODEL_TYPE.custom_python:
         return _load_custom_python_model(model_path)
     if model_type == MODEL_TYPE.pytorch:
@@ -344,6 +355,75 @@ def _load_model(model_path, model_type):
         return model
 
     raise ValueError(f"Unsupported model type: {model_type}")
+
+
+class _HailoModel:
+    """HailoRT backend for this repository's three raw YOLOv4 heads."""
+
+    def __init__(self, model_path):
+        from hailo_platform import (
+            HEF, VDevice, ConfigureParams, HailoStreamInterface,
+            InputVStreamParams, OutputVStreamParams, InferVStreams, FormatType,
+        )
+
+        self.resources = ExitStack()
+        try:
+            hef = HEF(model_path)
+            inputs = hef.get_input_vstream_infos()
+            outputs = hef.get_output_vstream_infos()
+            if len(inputs) != 1 or len(outputs) != 3:
+                raise ValueError("Expected one NHWC input and three raw YOLOv4 outputs")
+            self.input = inputs[0]
+            self.outputs = sorted(outputs, key=lambda info: info.shape[0], reverse=True)
+            height, width, channels = self.input.shape
+            if channels != 3 or any(
+                tuple(info.shape[:2]) != (height // stride, width // stride)
+                or info.shape[2] % 3 or info.shape[2] // 3 <= 5
+                for info, stride in zip(self.outputs, (8, 16, 32))
+            ) or len({info.shape[2] for info in self.outputs}) != 1:
+                raise ValueError("Unexpected raw YOLOv4 HEF input/output shapes")
+            device = self.resources.enter_context(VDevice())
+            config = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
+            group = device.configure(hef, config)[0]
+            input_params = InputVStreamParams.make(group, quantized=False, format_type=FormatType.FLOAT32)
+            output_params = OutputVStreamParams.make(group, quantized=False, format_type=FormatType.FLOAT32)
+            self.pipeline = self.resources.enter_context(InferVStreams(group, input_params, output_params))
+            self.resources.enter_context(group.activate(group.create_params()))
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        self.resources.close()
+
+    def infer(self, bgr):
+        numpy = _require_numpy()
+        height, width, _ = self.input.shape
+        rgb = cv2.cvtColor(cv2.resize(bgr, (width, height)), cv2.COLOR_BGR2RGB)
+        # Match the 0..255 float32 calibration in yolo_onnx_hailo.py.
+        outputs = self.pipeline.infer({self.input.name: rgb.astype(numpy.float32)[None]})
+        return _decode_hailo_yolo(outputs, self.outputs, height, width)
+
+
+def _decode_hailo_yolo(outputs, output_infos, input_height, input_width):
+    numpy = _require_numpy()
+    anchors = (((12, 16), (19, 36), (40, 28)),
+               ((36, 75), (76, 55), (72, 146)),
+               ((142, 110), (192, 243), (459, 401)))
+    boxes, scores = [], []
+    for info, head_anchors in zip(output_infos, anchors):
+        raw = numpy.asarray(outputs[info.name], dtype=numpy.float32)
+        height, width, channels = info.shape
+        if raw.shape != (1, height, width, channels):
+            raise ValueError(f"Unexpected Hailo output shape: {raw.shape}")
+        raw = raw[0].reshape(height, width, 3, channels // 3)
+        sigmoid = 1.0 / (1.0 + numpy.exp(-numpy.clip(raw, -80, 80)))
+        grid_y, grid_x = numpy.meshgrid(numpy.arange(height), numpy.arange(width), indexing="ij")
+        centers = (sigmoid[..., :2] + numpy.stack((grid_x, grid_y), axis=-1)[:, :, None]) / (width, height)
+        sizes = numpy.exp(numpy.clip(raw[..., 2:4], -80, 80)) * numpy.asarray(head_anchors) / (input_width, input_height)
+        boxes.append(numpy.concatenate((centers - sizes / 2, centers + sizes / 2), axis=-1).reshape(-1, 4))
+        scores.append((sigmoid[..., 4:5] * sigmoid[..., 5:]).reshape(-1, channels // 3 - 5))
+    return numpy.concatenate(boxes), numpy.concatenate(scores)
 
 
 def _load_custom_python_model(model_path):
@@ -380,6 +460,10 @@ def _run_detections(
             confidence_threshold,
             nms_iou_threshold,
         )
+
+    if model_type == MODEL_TYPE.hailo:
+        boxes, scores = model.infer(bgr)
+        return _postprocess_yolo(boxes, scores, bgr, confidence_threshold, nms_iou_threshold)
 
     predict = getattr(model, "predict", None)
     if callable(predict):
@@ -475,6 +559,11 @@ def _run_onnx_detections(
     boxes = box_array[0]
     class_scores = confs[0]
 
+    return _postprocess_yolo(boxes, class_scores, bgr, confidence_threshold, nms_iou_threshold)
+
+
+def _postprocess_yolo(boxes, class_scores, bgr, confidence_threshold, nms_iou_threshold):
+    numpy = _require_numpy()
     max_conf = numpy.max(class_scores, axis=1)
     class_ids = numpy.argmax(class_scores, axis=1)
 
@@ -926,6 +1015,9 @@ def _parse_args():
         default=MODEL_TYPE.pytorch.name,
         choices=[item.name for item in MODEL_TYPE],
     )
+    backend = parser.add_mutually_exclusive_group()
+    backend.add_argument("-onnx", dest="model_type", action="store_const", const="onnx", default=argparse.SUPPRESS)
+    backend.add_argument("-hailo", dest="model_type", action="store_const", const="hailo", default=argparse.SUPPRESS)
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument(
         "--confidence-threshold",
